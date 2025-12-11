@@ -7,20 +7,23 @@ Webエンジニア向けに、データエンジニアリングの基礎からAp
 ## 前提環境
 
 ```bash
-# Node.js 20以上推奨
+# Node.js 22以上推奨（24.x LTSも可）
 node -v
 
 # プロジェクト初期化
 mkdir data-engineering-learning
 cd data-engineering-learning
-npm init -y
-npm install typescript ts-node @types/node -D
-npx tsc --init
+pnpm init
+pnpm add -D typescript ts-node @types/node
+pnpm exec tsc --init
 
 # 必要なパッケージ（Week毎に追加）
-npm install duckdb
-npm install pg @types/pg           # PostgreSQL
+pnpm add @duckdb/node-api          # 旧duckdbパッケージは非推奨
+pnpm add pg @types/pg              # PostgreSQL
 ```
+
+> **重要**: 旧 `duckdb` パッケージは非推奨となり、DuckDB 1.5.x（2026年初頭）以降はリリースされません。
+> 新しい `@duckdb/node-api`（Node Neo）を使用してください。
 
 ## 全体像
 
@@ -167,12 +170,12 @@ Column "time":      [50, 45, 120, ...]
 
 ```typescript
 // src/week1/csv-vs-parquet.ts
-import * as duckdb from "duckdb";
+import { DuckDBInstance } from "@duckdb/node-api";
 import * as fs from "fs";
 
 async function main() {
-  const db = new duckdb.Database(":memory:");
-  const conn = db.connect();
+  const db = await DuckDBInstance.create(":memory:");
+  const conn = await db.connect();
 
   const dataDir = "./data";
   if (!fs.existsSync(dataDir)) {
@@ -182,14 +185,14 @@ async function main() {
   // 100万行のデータを生成してCSVとParquetで保存
   console.log("Generating 1,000,000 rows...");
 
-  await runQuery(conn, `
+  await conn.run(`
     CREATE TABLE events AS
-    SELECT 
+    SELECT
       (random() * 10000)::INT as user_id,
-      CASE (random() * 3)::INT 
-        WHEN 0 THEN 'click' 
-        WHEN 1 THEN 'view' 
-        ELSE 'purchase' 
+      CASE (random() * 3)::INT
+        WHEN 0 THEN 'click'
+        WHEN 1 THEN 'view'
+        ELSE 'purchase'
       END as event_type,
       random() * 1000 as amount,
       TIMESTAMP '2024-01-01' + INTERVAL (random() * 365) DAY as timestamp
@@ -198,11 +201,11 @@ async function main() {
 
   // CSVで保存
   console.log("\nExporting to CSV...");
-  await runQuery(conn, `COPY events TO '${dataDir}/data.csv' (HEADER, DELIMITER ',');`);
+  await conn.run(`COPY events TO '${dataDir}/data.csv' (HEADER, DELIMITER ',');`);
 
   // Parquetで保存
   console.log("Exporting to Parquet...");
-  await runQuery(conn, `COPY events TO '${dataDir}/data.parquet' (FORMAT PARQUET);`);
+  await conn.run(`COPY events TO '${dataDir}/data.parquet' (FORMAT PARQUET);`);
 
   // ファイルサイズ比較
   const csvSize = fs.statSync(`${dataDir}/data.csv`).size;
@@ -213,14 +216,8 @@ async function main() {
   console.log(`Parquet: ${(parquetSize / 1024 / 1024).toFixed(2)} MB`);
   console.log(`Ratio:   ${(csvSize / parquetSize).toFixed(2)}x smaller`);
 
-  conn.close();
-  db.close();
-}
-
-function runQuery(conn: duckdb.Connection, sql: string): Promise<void> {
-  return new Promise((resolve, reject) => {
-    conn.run(sql, (err) => (err ? reject(err) : resolve()));
-  });
+  await conn.close();
+  await db.close();
 }
 
 main().catch(console.error);
@@ -303,47 +300,44 @@ main().catch(console.error);
 
 ```typescript
 // src/week2/parquet-metadata.ts
-import * as duckdb from "duckdb";
+import { DuckDBInstance } from "@duckdb/node-api";
 
 async function main() {
-  const db = new duckdb.Database(":memory:");
-  const conn = db.connect();
+  const db = await DuckDBInstance.create(":memory:");
+  const conn = await db.connect();
 
   console.log("=== Parquet Metadata ===\n");
 
   // スキーマ確認
   console.log("Schema:");
-  await query(conn, `DESCRIBE SELECT * FROM './data/data.parquet'`);
+  const schemaReader = await conn.runAndReadAll(
+    `DESCRIBE SELECT * FROM './data/data.parquet'`
+  );
+  console.table(schemaReader.getRows());
 
   // Parquetメタデータの詳細
   console.log("\nFile Metadata:");
-  await query(conn, `SELECT * FROM parquet_metadata('./data/data.parquet')`);
+  const metaReader = await conn.runAndReadAll(
+    `SELECT * FROM parquet_metadata('./data/data.parquet')`
+  );
+  console.table(metaReader.getRows());
 
   // Row Groupごとの統計情報
   console.log("\nColumn Statistics per Row Group:");
-  await query(conn, `
-    SELECT 
+  const statsReader = await conn.runAndReadAll(`
+    SELECT
       row_group_id,
-      column_id, 
+      column_id,
       path_in_schema as column_name,
       num_values,
       stats_min,
       stats_max
     FROM parquet_metadata('./data/data.parquet')
   `);
+  console.table(statsReader.getRows());
 
-  conn.close();
-  db.close();
-}
-
-function query(conn: duckdb.Connection, sql: string): Promise<void> {
-  return new Promise((resolve, reject) => {
-    conn.all(sql, (err, result) => {
-      if (err) reject(err);
-      console.table(result);
-      resolve();
-    });
-  });
+  await conn.close();
+  await db.close();
 }
 
 main().catch(console.error);
@@ -359,13 +353,13 @@ main().catch(console.error);
 
 ```typescript
 // src/week2/partitioning.ts
-import * as duckdb from "duckdb";
+import { DuckDBInstance } from "@duckdb/node-api";
 import * as fs from "fs";
 import * as path from "path";
 
 async function main() {
-  const db = new duckdb.Database(":memory:");
-  const conn = db.connect();
+  const db = await DuckDBInstance.create(":memory:");
+  const conn = await db.connect();
 
   const partitionedDir = "./data/partitioned_data";
   if (fs.existsSync(partitionedDir)) {
@@ -375,15 +369,15 @@ async function main() {
   // 1年分のデータを作成
   console.log("Creating 1 year of event data...");
 
-  await runQuery(conn, `
+  await conn.run(`
     CREATE TABLE events AS
-    SELECT 
+    SELECT
       TIMESTAMP '2024-01-01' + INTERVAL (i / 1000) DAY as event_date,
       (random() * 10000)::INT as user_id,
-      CASE (random() * 3)::INT 
-        WHEN 0 THEN 'click' 
-        WHEN 1 THEN 'view' 
-        ELSE 'purchase' 
+      CASE (random() * 3)::INT
+        WHEN 0 THEN 'click'
+        WHEN 1 THEN 'view'
+        ELSE 'purchase'
       END as event_type,
       random() * 1000 as amount
     FROM generate_series(1, 365000) as t(i);
@@ -392,14 +386,14 @@ async function main() {
   // 年月でパーティション分割して保存
   console.log("\nExporting with partitioning by year/month...");
 
-  await runQuery(conn, `
+  await conn.run(`
     COPY (
-      SELECT 
+      SELECT
         *,
         YEAR(event_date) as year,
         MONTH(event_date) as month
       FROM events
-    ) TO '${partitionedDir}' 
+    ) TO '${partitionedDir}'
     (FORMAT PARQUET, PARTITION_BY (year, month));
   `);
 
@@ -412,16 +406,22 @@ async function main() {
 
   console.log("\nFull scan (all months):");
   console.time("full-scan");
-  await query(conn, `SELECT COUNT(*), AVG(amount) FROM '${partitionedDir}/**/*.parquet'`);
+  const fullReader = await conn.runAndReadAll(
+    `SELECT COUNT(*), AVG(amount) FROM '${partitionedDir}/**/*.parquet'`
+  );
+  console.table(fullReader.getRows());
   console.timeEnd("full-scan");
 
   console.log("\nPartition pruning (January only):");
   console.time("partition-pruning");
-  await query(conn, `SELECT COUNT(*), AVG(amount) FROM '${partitionedDir}/year=2024/month=1/*.parquet'`);
+  const partReader = await conn.runAndReadAll(
+    `SELECT COUNT(*), AVG(amount) FROM '${partitionedDir}/year=2024/month=1/*.parquet'`
+  );
+  console.table(partReader.getRows());
   console.timeEnd("partition-pruning");
 
-  conn.close();
-  db.close();
+  await conn.close();
+  await db.close();
 }
 
 function listDir(dir: string, indent = "") {
@@ -430,29 +430,13 @@ function listDir(dir: string, indent = "") {
     const fullPath = path.join(dir, item);
     const stat = fs.statSync(fullPath);
     if (stat.isDirectory()) {
-      console.log(`${indent}📁 ${item}/`);
+      console.log(`${indent}dir: ${item}/`);
       listDir(fullPath, indent + "  ");
     } else {
       const sizeKB = (stat.size / 1024).toFixed(1);
-      console.log(`${indent}📄 ${item} (${sizeKB} KB)`);
+      console.log(`${indent}file: ${item} (${sizeKB} KB)`);
     }
   }
-}
-
-function runQuery(conn: duckdb.Connection, sql: string): Promise<void> {
-  return new Promise((resolve, reject) => {
-    conn.run(sql, (err) => (err ? reject(err) : resolve()));
-  });
-}
-
-function query(conn: duckdb.Connection, sql: string): Promise<void> {
-  return new Promise((resolve, reject) => {
-    conn.all(sql, (err, result) => {
-      if (err) reject(err);
-      console.table(result);
-      resolve();
-    });
-  });
 }
 
 main().catch(console.error);
@@ -579,22 +563,25 @@ main().catch(console.error);
 
 ```typescript
 // src/week3/duckdb-basics.ts
-import * as duckdb from "duckdb";
+import { DuckDBInstance } from "@duckdb/node-api";
 
 async function main() {
-  const db = new duckdb.Database(":memory:");
-  const conn = db.connect();
+  const db = await DuckDBInstance.create(":memory:");
+  const conn = await db.connect();
 
   console.log("=== DuckDB Basics ===\n");
 
   // Parquetファイルを直接クエリ（テーブル作成不要）
   console.log("1. Query Parquet directly:");
-  await query(conn, `SELECT * FROM './data/data.parquet' LIMIT 5`);
+  const r1 = await conn.runAndReadAll(
+    `SELECT * FROM './data/data.parquet' LIMIT 5`
+  );
+  console.table(r1.getRows());
 
   // SQLでの集計
   console.log("\n2. Aggregation:");
-  await query(conn, `
-    SELECT 
+  const r2 = await conn.runAndReadAll(`
+    SELECT
       event_type,
       COUNT(*) as count,
       ROUND(AVG(amount), 2) as avg_amount,
@@ -603,11 +590,12 @@ async function main() {
     GROUP BY event_type
     ORDER BY count DESC
   `);
+  console.table(r2.getRows());
 
   // 時系列分析
   console.log("\n3. Time series analysis:");
-  await query(conn, `
-    SELECT 
+  const r3 = await conn.runAndReadAll(`
+    SELECT
       DATE_TRUNC('month', timestamp) as month,
       COUNT(*) as events,
       ROUND(SUM(amount), 2) as revenue
@@ -616,18 +604,19 @@ async function main() {
     ORDER BY 1
     LIMIT 6
   `);
+  console.table(r3.getRows());
 
   // Window関数
   console.log("\n4. Window functions (running total):");
-  await query(conn, `
+  const r4 = await conn.runAndReadAll(`
     WITH monthly AS (
-      SELECT 
+      SELECT
         DATE_TRUNC('month', timestamp) as month,
         SUM(amount) as revenue
       FROM './data/data.parquet'
       GROUP BY 1
     )
-    SELECT 
+    SELECT
       month,
       ROUND(revenue, 2) as revenue,
       ROUND(SUM(revenue) OVER (ORDER BY month), 2) as cumulative_revenue
@@ -635,30 +624,22 @@ async function main() {
     ORDER BY month
     LIMIT 6
   `);
+  console.table(r4.getRows());
 
   // 複数ファイルの結合
   console.log("\n5. Query partitioned data with glob:");
-  await query(conn, `
-    SELECT 
+  const r5 = await conn.runAndReadAll(`
+    SELECT
       year, month, COUNT(*) as events
     FROM './data/partitioned_data/**/*.parquet'
     GROUP BY year, month
     ORDER BY year, month
     LIMIT 6
   `);
+  console.table(r5.getRows());
 
-  conn.close();
-  db.close();
-}
-
-function query(conn: duckdb.Connection, sql: string): Promise<void> {
-  return new Promise((resolve, reject) => {
-    conn.all(sql, (err, result) => {
-      if (err) reject(err);
-      console.table(result);
-      resolve();
-    });
-  });
+  await conn.close();
+  await db.close();
 }
 
 main().catch(console.error);
@@ -672,48 +653,43 @@ main().catch(console.error);
 
 ```typescript
 // src/week3/explain-plan.ts
-import * as duckdb from "duckdb";
+import { DuckDBInstance } from "@duckdb/node-api";
 
 async function main() {
-  const db = new duckdb.Database(":memory:");
-  const conn = db.connect();
+  const db = await DuckDBInstance.create(":memory:");
+  const conn = await db.connect();
 
   console.log("=== Query Execution Plans ===\n");
 
   // シンプルなクエリ
   console.log("1. Simple aggregation plan:");
-  await explain(conn, `
+  const r1 = await conn.runAndReadAll(`
+    EXPLAIN ANALYZE
     SELECT event_type, SUM(amount)
     FROM './data/data.parquet'
     WHERE amount > 100
     GROUP BY event_type
   `);
+  const rows1 = r1.getRows();
+  if (rows1.length > 0) {
+    console.log(rows1[0]);
+  }
 
   // フィルタ付きクエリ
   console.log("\n2. With predicate pushdown:");
-  await explain(conn, `
+  const r2 = await conn.runAndReadAll(`
+    EXPLAIN ANALYZE
     SELECT COUNT(*)
     FROM './data/data.parquet'
     WHERE user_id = 1234
   `);
+  const rows2 = r2.getRows();
+  if (rows2.length > 0) {
+    console.log(rows2[0]);
+  }
 
-  conn.close();
-  db.close();
-}
-
-function explain(conn: duckdb.Connection, sql: string): Promise<void> {
-  return new Promise((resolve, reject) => {
-    conn.all(`EXPLAIN ANALYZE ${sql}`, (err, result) => {
-      if (err) reject(err);
-      if (result && result.length > 0) {
-        const output = (result[0] as Record<string, unknown>)["explain_value"] 
-          || (result[0] as Record<string, unknown>)["EXPLAIN ANALYZE"]
-          || JSON.stringify(result[0], null, 2);
-        console.log(output);
-      }
-      resolve();
-    });
-  });
+  await conn.close();
+  await db.close();
 }
 
 main().catch(console.error);
@@ -734,7 +710,7 @@ main().catch(console.error);
 
 ```typescript
 // src/week3/performance-comparison.ts
-import * as duckdb from "duckdb";
+import { DuckDBInstance } from "@duckdb/node-api";
 import { Client } from "pg";
 
 async function main() {
@@ -749,8 +725,8 @@ async function main() {
   });
   await pgClient.connect();
 
-  const duckDb = new duckdb.Database(":memory:");
-  const duckConn = duckDb.connect();
+  const db = await DuckDBInstance.create(":memory:");
+  const duckConn = await db.connect();
 
   const rowCount = 1000000;
   console.log(`Loading ${rowCount.toLocaleString()} rows into both databases...\n`);
@@ -768,7 +744,7 @@ async function main() {
   `);
   await pgClient.query(`
     INSERT INTO events (user_id, event_type, amount, created_at)
-    SELECT 
+    SELECT
       (random() * 10000)::int,
       CASE (random() * 3)::int WHEN 0 THEN 'click' WHEN 1 THEN 'view' ELSE 'purchase' END,
       random() * 1000,
@@ -777,9 +753,9 @@ async function main() {
   `);
 
   // DuckDBにデータ投入
-  await runDuckQuery(duckConn, `
+  await duckConn.run(`
     CREATE TABLE events AS
-    SELECT 
+    SELECT
       i as id,
       (random() * 10000)::INT as user_id,
       CASE (random() * 3)::INT WHEN 0 THEN 'click' WHEN 1 THEN 'view' ELSE 'purchase' END as event_type,
@@ -795,9 +771,9 @@ async function main() {
   console.timeEnd("PostgreSQL");
 
   console.time("DuckDB");
-  await runDuckQuery(duckConn, "SELECT * FROM events WHERE id = 500000");
+  await duckConn.run("SELECT * FROM events WHERE id = 500000");
   console.timeEnd("DuckDB");
-  console.log("→ PostgreSQL wins (indexed lookup)\n");
+  console.log("-> PostgreSQL wins (indexed lookup)\n");
 
   // ベンチマーク2: 集計クエリ
   console.log("--- Benchmark 2: Aggregation (OLAP) ---");
@@ -810,18 +786,18 @@ async function main() {
   console.timeEnd("PostgreSQL");
 
   console.time("DuckDB");
-  await runDuckQuery(duckConn, `
-    SELECT event_type, COUNT(*), AVG(amount) 
-    FROM events 
+  await duckConn.run(`
+    SELECT event_type, COUNT(*), AVG(amount)
+    FROM events
     GROUP BY event_type
   `);
   console.timeEnd("DuckDB");
-  console.log("→ DuckDB wins (columnar scan)\n");
+  console.log("-> DuckDB wins (columnar scan)\n");
 
   // ベンチマーク3: 複雑な集計
   console.log("--- Benchmark 3: Complex Aggregation ---");
   const complexQuery = `
-    SELECT 
+    SELECT
       DATE_TRUNC('month', created_at) as month,
       event_type,
       COUNT(*) as count,
@@ -837,19 +813,13 @@ async function main() {
   console.timeEnd("PostgreSQL");
 
   console.time("DuckDB");
-  await runDuckQuery(duckConn, complexQuery);
+  await duckConn.run(complexQuery);
   console.timeEnd("DuckDB");
-  console.log("→ DuckDB wins significantly\n");
+  console.log("-> DuckDB wins significantly\n");
 
   await pgClient.end();
-  duckConn.close();
-  duckDb.close();
-}
-
-function runDuckQuery(conn: duckdb.Connection, sql: string): Promise<void> {
-  return new Promise((resolve, reject) => {
-    conn.all(sql, (err) => (err ? reject(err) : resolve()));
-  });
+  await duckConn.close();
+  await db.close();
 }
 
 main().catch(console.error);
@@ -865,12 +835,13 @@ main().catch(console.error);
 
 ### 4-1: Iceberg環境構築
 
+> **Note**: Spark 4.0 と Iceberg 1.10.0 を使用します。
+
 ```yaml
 # docker-compose.yml
-version: '3.8'
 services:
   spark-iceberg:
-    image: tabulario/spark-iceberg:3.5.1_1.5.2
+    build: ./spark
     container_name: spark-iceberg
     ports:
       - "8888:8888"  # Jupyter
@@ -880,12 +851,87 @@ services:
     volumes:
       - ./warehouse:/home/iceberg/warehouse
       - ./notebooks:/home/iceberg/notebooks
+    environment:
+      - AWS_ACCESS_KEY_ID=admin
+      - AWS_SECRET_ACCESS_KEY=password
+      - AWS_REGION=us-east-1
+    depends_on:
+      - rest
+      - minio
+
+  rest:
+    image: apache/iceberg-rest-fixture
+    container_name: iceberg-rest
+    ports:
+      - "8181:8181"
+    environment:
+      - CATALOG_WAREHOUSE=s3://warehouse/
+      - CATALOG_IO__IMPL=org.apache.iceberg.aws.s3.S3FileIO
+      - CATALOG_S3_ENDPOINT=http://minio:9000
+      - CATALOG_S3_PATH__STYLE__ACCESS=true
+      - AWS_ACCESS_KEY_ID=admin
+      - AWS_SECRET_ACCESS_KEY=password
+      - AWS_REGION=us-east-1
+
+  minio:
+    image: minio/minio
+    container_name: minio
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      - MINIO_ROOT_USER=admin
+      - MINIO_ROOT_PASSWORD=password
+    command: server /data --console-address ":9001"
+
+  mc:
+    image: minio/mc
+    container_name: mc
+    depends_on:
+      - minio
+    entrypoint: >
+      /bin/sh -c "
+      sleep 5;
+      mc alias set minio http://minio:9000 admin password;
+      mc mb minio/warehouse;
+      exit 0;
+      "
+```
+
+```dockerfile
+# spark/Dockerfile
+FROM apache/spark:4.0.1-scala2.13-java17-python3-ubuntu
+
+USER root
+
+# Iceberg runtime JARs
+RUN curl -o /opt/spark/jars/iceberg-spark-runtime-4.0_2.13-1.10.0.jar \
+    https://repo1.maven.org/maven2/org/apache/iceberg/iceberg-spark-runtime-4.0_2.13/1.10.0/iceberg-spark-runtime-4.0_2.13-1.10.0.jar && \
+    curl -o /opt/spark/jars/iceberg-aws-bundle-1.10.0.jar \
+    https://repo1.maven.org/maven2/org/apache/iceberg/iceberg-aws-bundle/1.10.0/iceberg-aws-bundle-1.10.0.jar
+
+# Python dependencies
+RUN pip install jupyterlab "pyiceberg[s3fs,pyarrow]>=0.10.0"
+
+WORKDIR /home/iceberg
+USER spark
+
+CMD ["jupyter", "lab", "--ip=0.0.0.0", "--port=8888", "--no-browser", "--allow-root"]
 ```
 
 ```bash
+# 起動
 docker-compose up -d
+
 # Jupyter Notebookが http://localhost:8888 で起動
+# MinIO Consoleが http://localhost:9001 で起動（admin/password）
 ```
+
+#### Spark 4.0の主な変更点
+
+1. **ANSIモードがデフォルト有効** - 厳密なSQL動作（暗黙の型変換制限など）
+2. **VARIANT型ネイティブサポート** - Iceberg V3のVARIANT型とシームレスに連携
+3. **Spark Connectの強化** - 軽量Pythonクライアント（pyspark-client: 1.5MB）
 
 ---
 
@@ -1043,6 +1089,110 @@ main();
 
 ---
 
+### 4-8: Iceberg V3の新機能
+
+> **Note**: Iceberg V3 spec（バージョン 1.8.0〜1.10.0）で導入された主要な新機能です。
+
+#### Deletion Vectors（削除ベクトル）
+
+V3ではバイナリ形式の削除ベクトルが導入され、行レベル削除が大幅に効率化されました：
+
+```
+従来（V2）:
+├── データファイル + 削除ファイルをマージして読み取り
+└── 削除操作のたびにファイル書き換えが発生
+
+V3（Deletion Vectors）:
+├── ビットマップ形式で削除情報を保持
+├── 読み取り時に適用（merge-on-read）
+└── 書き込みコストを大幅に削減
+```
+
+```sql
+-- Deletion Vectorsの有効化
+ALTER TABLE demo.db.orders
+SET TBLPROPERTIES ('write.delete.mode' = 'merge-on-read');
+
+-- 効率的な行削除（ファイル書き換えなし）
+DELETE FROM demo.db.orders WHERE status = 'cancelled';
+
+-- 読み取り時に削除情報が適用される
+SELECT * FROM demo.db.orders;
+```
+
+#### VARIANT型（セミ構造化データ）
+
+JSONライクな柔軟なデータを型安全に扱えます：
+
+```sql
+-- VARIANT型カラムを持つテーブル
+CREATE TABLE demo.db.events (
+    event_id BIGINT,
+    event_time TIMESTAMP,
+    payload VARIANT
+) USING iceberg;
+
+-- JSONデータの挿入
+INSERT INTO demo.db.events VALUES
+    (1, current_timestamp(), PARSE_JSON('{"action": "click", "target": "button1", "metadata": {"version": 2}}')),
+    (2, current_timestamp(), PARSE_JSON('{"action": "purchase", "item_id": 12345, "price": 99.99}'));
+
+-- VARIANT内のフィールドにアクセス（ドット記法）
+SELECT
+    event_id,
+    payload:action AS action,
+    payload:metadata:version AS version
+FROM demo.db.events;
+
+-- JSON関数との組み合わせ
+SELECT
+    event_id,
+    JSON_VALUE(payload, '$.action') AS action
+FROM demo.db.events
+WHERE JSON_VALUE(payload, '$.action') = 'purchase';
+```
+
+#### デフォルトカラム値
+
+カラム追加時にデフォルト値を指定可能（メタデータのみの変更、データファイル書き換え不要）：
+
+```sql
+-- デフォルト値付きでカラム追加（瞬時に完了）
+ALTER TABLE demo.db.orders ADD COLUMN version INT DEFAULT 1;
+ALTER TABLE demo.db.orders ADD COLUMN region STRING DEFAULT 'unknown';
+
+-- 既存データは読み取り時にデフォルト値が適用される
+SELECT order_id, version, region FROM demo.db.orders LIMIT 5;
+-- 結果: version=1, region='unknown' が返される（ファイルには値がない）
+```
+
+#### Nanosecond Precision Timestamps
+
+イベント処理やテレメトリーワークロード向けの高精度タイムスタンプ：
+
+```sql
+CREATE TABLE demo.db.telemetry (
+    sensor_id STRING,
+    event_time TIMESTAMP_NS,  -- ナノ秒精度
+    value DOUBLE
+) USING iceberg;
+```
+
+#### Geospatial Types（地理空間型）
+
+位置情報分析やマッピングユースケース向け：
+
+```sql
+CREATE TABLE demo.db.locations (
+    id BIGINT,
+    name STRING,
+    location GEOMETRY,        -- 幾何データ
+    coverage GEOGRAPHY        -- 地理データ（球面座標系）
+) USING iceberg;
+```
+
+---
+
 ## 補足資料
 
 ### 用語集（Webエンジニア向け対応表）
@@ -1057,6 +1207,9 @@ main();
 | Compaction | DBのVACUUM |
 | データレイク | オブジェクトストレージ上のファイル群 |
 | DuckDB | SQLiteのOLAP版 |
+| Deletion Vectors | 論理削除フラグ（V3新機能） |
+| VARIANT型 | JSONカラム、NoSQLドキュメント |
+| Merge-on-Read | 遅延評価、読み取り時結合 |
 
 ---
 
@@ -1077,23 +1230,39 @@ main();
     "week3:benchmark": "ts-node src/week3/performance-comparison.ts"
   },
   "dependencies": {
-    "duckdb": "^1.0.0",
-    "pg": "^8.11.0"
+    "@duckdb/node-api": "^1.4.0",
+    "pg": "^8.16.0"
   },
   "devDependencies": {
-    "@types/node": "^20.0.0",
+    "@types/node": "^22.0.0",
     "@types/pg": "^8.10.0",
     "ts-node": "^10.9.0",
-    "typescript": "^5.0.0"
+    "typescript": "^5.9.0"
   }
 }
 ```
+
+> **Note**: 旧 `duckdb` パッケージは非推奨です。新しい `@duckdb/node-api`（DuckDB Node Neo）を使用してください。
+> Node Neo は Promise ベースで TypeScript ネイティブ対応しています。
 
 ---
 
 ## 参考リソース
 
+### Apache Iceberg
 - [Apache Iceberg公式ドキュメント](https://iceberg.apache.org/docs/latest/)
+- [Iceberg V3の新機能](https://opensource.googleblog.com/2025/08/whats-new-in-iceberg-v3.html)
+- [PyIceberg](https://py.iceberg.apache.org/) - PythonからIcebergを操作
+
+### DuckDB
 - [DuckDB公式ドキュメント](https://duckdb.org/docs/)
-- [Tabular社チュートリアル](https://tabular.io/blog/)
-- [docker-spark-iceberg](https://github.com/tabular-io/docker-spark-iceberg)
+- [DuckDB Node Neo](https://duckdb.org/docs/stable/clients/node_neo/overview) - 新しいNode.js API
+- [@duckdb/node-api (npm)](https://www.npmjs.com/package/@duckdb/node-api)
+
+### Apache Spark
+- [Apache Spark 4.0 Release Notes](https://spark.apache.org/releases/spark-release-4-0-0.html)
+- [Spark and Iceberg Quickstart](https://iceberg.apache.org/spark-quickstart/)
+
+### Docker環境
+- [docker-spark-iceberg](https://github.com/databricks/docker-spark-iceberg)
+- [Apache Spark Docker Images](https://hub.docker.com/r/apache/spark)
