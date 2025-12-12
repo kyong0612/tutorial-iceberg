@@ -1,0 +1,23 @@
+{
+  "name": "data-engineering-learning",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "packageManager": "pnpm@10.17.1",
+  "devDependencies": {
+    "@types/node": "^25.0.1",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.9.3"
+  },
+  "dependencies": {
+    "@duckdb/node-api": "1.4.3-r.1",
+    "@types/pg": "^8.16.0",
+    "pg": "^8.16.3"
+  }
+}

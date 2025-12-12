@@ -1010,7 +1010,7 @@ SELECT * FROM demo.db.orders VERSION AS OF <snapshot_id>;
 SELECT * FROM demo.db.orders TIMESTAMP AS OF '2024-01-15 10:00:00';
 
 -- ロールバック
-CALL demo.system.rollback_to_snapshot('db.orders', <snapshot_id>);
+CALL demo.system.rollback_to_snapshot(table => 'db.orders', snapshot_id => <snapshot_id>);
 ```
 
 ---
@@ -1022,10 +1022,10 @@ CALL demo.system.rollback_to_snapshot('db.orders', <snapshot_id>);
 CALL demo.system.rewrite_data_files('db.orders');
 
 -- 古いスナップショット削除
-CALL demo.system.expire_snapshots('db.orders', TIMESTAMP '2024-01-01 00:00:00');
+CALL demo.system.expire_snapshots(table => 'db.orders', older_than => TIMESTAMP '2024-01-01 00:00:00');
 
 -- 孤立ファイル削除
-CALL demo.system.remove_orphan_files('db.orders');
+CALL demo.system.remove_orphan_files(table => 'db.orders');
 ```
 
 ---
